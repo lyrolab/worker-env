@@ -24,3 +24,65 @@ jobs:
 
       - name: Run tests
         run: npm test
+
+  integration:
+    name: Run tests against resource containers
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+        options: >-
+          --name test-postgres
+          --health-cmd pg_isready
+          --health-interval 2s
+          --health-timeout 5s
+          --health-retries 20
+      mongo:
+        image: mongo:7
+        options: >-
+          --name test-mongo
+          --health-cmd "mongosh --quiet --eval 'db.runCommand({ ping: 1 }).ok'"
+          --health-interval 2s
+          --health-timeout 10s
+          --health-retries 20
+      redis:
+        image: redis:7
+        options: >-
+          --name test-redis
+          --health-cmd "redis-cli ping"
+          --health-interval 2s
+          --health-timeout 5s
+          --health-retries 20
+      typesense:
+        image: typesense/typesense:27.1
+        env:
+          TYPESENSE_API_KEY: test-key
+          TYPESENSE_DATA_DIR: /tmp
+        ports:
+          - 8108:8108
+        options: --name test-typesense
+
+    env:
+      WORKER_ENV_TEST_POSTGRES: test-postgres
+      WORKER_ENV_TEST_MONGO: test-mongo
+      WORKER_ENV_TEST_REDIS: test-redis
+      WORKER_ENV_TEST_TYPESENSE_URL: http://localhost:8108
+      WORKER_ENV_TEST_TYPESENSE_API_KEY: test-key
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+
+      - name: Wait for Typesense
+        run: timeout 60 sh -c 'until curl -sf http://localhost:8108/health; do sleep 1; done'
+
+      - name: Run tests
+        run: npm test

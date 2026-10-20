@@ -24,6 +24,7 @@ Each checkout runs at most one env; separate checkouts (clones or worktrees) run
 ## How an env runs
 
 - The env id is `<name>_worker_<12 hex>`, new on every start.
+- The supervisor creates the configured [resources](#resources) on shared containers, then runs the `setup` steps, then starts the services. Teardown stops the services, then drops the resources.
 - Every service gets an OS-assigned port on `127.0.0.1` and runs in a process group of its own. Any service exit, failed setup step, health timeout or `worker down` stops every group.
 - A service with `browser: true` gets the origin `http://<id>.<name>.localhost:<port>`. Browsers resolve `*.localhost` to loopback and treat it as a secure context, so cookies and storage never mix with another env or the owner env. Other services' origin is their loopback URL.
 - State lives in `.worker/` at the checkout root, which ignores itself in git:
@@ -39,12 +40,20 @@ Each checkout runs at most one env; separate checkouts (clones or worktrees) run
 export default {
   name: "my-app",
   install: ["pnpm install --frozen-lockfile --prefer-offline"],
+  resources: {
+    db: {
+      type: "postgres",
+      container: "my-app-postgres",
+      url: "postgres://postgres:postgres@localhost:5432",
+    },
+    cache: { type: "redis", container: "my-app-redis" },
+  },
   setup: [
     {
       command: "node_modules/.bin/prisma",
       args: ["migrate", "deploy"],
       cwd: "packages/api",
-      env: { DATABASE_URL: "postgres://localhost:5432/${id}" },
+      env: { DATABASE_URL: "${db.url}" },
     },
   ],
   services: {
@@ -52,7 +61,13 @@ export default {
       cwd: "packages/api",
       command: "node_modules/.bin/tsx",
       args: ["watch", "src/main.ts"],
-      env: { PORT: "${port}", FRONTEND_URL: "${web.origin}" },
+      env: {
+        PORT: "${port}",
+        FRONTEND_URL: "${web.origin}",
+        DATABASE_URL: "${db.url}",
+        REDIS_URL: "redis://localhost:6379",
+        REDIS_PREFIX: "${cache.prefix}",
+      },
       health: "/health",
     },
     web: {
@@ -66,13 +81,14 @@ export default {
 }
 ```
 
-| Key              | Type             | Description                                                                                                                     |
-| ---------------- | ---------------- | ------------------------------------------------------------------------------------------------------------------------------- |
-| `name`           | string, required | Lowercase letters, digits and `-`, starting with a letter. Prefix of the env id and part of browser hostnames.                  |
-| `install`        | step[]           | Run by `worker up` before starting, from the checkout root, logged to `.worker/install.log`. Skipped when the env already runs. |
-| `setup`          | step[]           | Run by the supervisor in order once ports are assigned, before services start, logged to `.worker/setup.log`.                   |
-| `services`       | object, required | Service name (lowercase letters, digits, `-`) to service. Services start together.                                              |
-| `startTimeoutMs` | integer          | Time every service has to answer its health path. Default `180000`.                                                             |
+| Key              | Type             | Description                                                                                                                           |
+| ---------------- | ---------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
+| `name`           | string, required | Lowercase letters, digits and `-`, starting with a letter, at most 43 characters. Prefix of the env id and part of browser hostnames. |
+| `install`        | step[]           | Run by `worker up` before starting, from the checkout root, logged to `.worker/install.log`. Skipped when the env already runs.       |
+| `resources`      | object           | Resource name (lowercase letters, digits, `-`, distinct from service names) to [resource](#resources).                                |
+| `setup`          | step[]           | Run by the supervisor in order once ports are assigned, before services start, logged to `.worker/setup.log`.                         |
+| `services`       | object, required | Service name (lowercase letters, digits, `-`) to service. Services start together.                                                    |
+| `startTimeoutMs` | integer          | Time every service has to answer its health path. Default `180000`.                                                                   |
 
 A step is either a string, run through `sh -c`, or an object:
 
@@ -101,6 +117,7 @@ A service must listen on `127.0.0.1` at the port it receives. Start servers thro
 | `${id}`                          | Env id                                                 | setup, services          |
 | `${name}`                        | Config `name`                                          | setup, services          |
 | `${root}`                        | Absolute checkout root                                 | install, setup, services |
+| `${<resource>.<value>}`          | A value of that [resource](#resources)                 | setup, services          |
 | `${<service>.port}`              | That service's port                                    | setup, services          |
 | `${<service>.url}`               | `http://127.0.0.1:<port>`                              | setup, services          |
 | `${<service>.origin}`            | Browser origin when `browser: true`, its URL otherwise | setup, services          |
@@ -108,10 +125,40 @@ A service must listen on `127.0.0.1` at the port it receives. Start servers thro
 
 An unknown variable fails validation. Shell variables in string steps use the `$NAME` form.
 
+### Resources
+
+Each resource is a database or prefix of the env on a container shared with the checkout that owns it. The supervisor creates it before `setup` and drops it on teardown. worker-env never starts, stops or recreates containers: a container that is not running fails `worker up` with a message naming it. Creation and teardown refuse any name outside the env id pattern, so resources of the owner env stay untouched.
+
+The owner of each resource is recorded as `{ host, pid, root, groups }`: host name, supervisor pid, checkout root and service process groups.
+
+| `type`      | Keys                                                          | Created on the shared container                                                                             | Owner record                    | Values            |
+| ----------- | ------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------- | ------------------------------- | ----------------- |
+| `postgres`  | `container` (required), `url` (required), `user` (`postgres`) | Database `<id>` through `docker exec <container> psql`; dropped `WITH (FORCE)`. Postgres 13 or later.       | Database comment                | `database`, `url` |
+| `mongo`     | `container` (required), `url` (required)                      | Database `<id>` through `docker exec <container> mongosh`, which must connect without credentials.          | `_worker_owner` collection      | `database`, `url` |
+| `redis`     | `container` (required)                                        | Key prefix `<id>`; teardown deletes every key matching `<id>*` through `docker exec <container> redis-cli`. | Key `<id>:_worker_owner`        | `prefix`          |
+| `typesense` | `url` (required), `apiKey` (required)                         | Collection prefix `<id>_`; teardown deletes collections and aliases named `<id>_*` through the HTTP API.    | Collection `<id>__worker_owner` | `prefix`          |
+
+- `container` is the name of the running Docker container.
+- `url` of `postgres` and `mongo` is the server URL as services reach it; `${<resource>.url}` is that URL with the env's database as its path, keeping credentials and query.
+- `url` of `typesense` is the API base URL, also used to check that Typesense answers before creating anything.
+- `${<resource>.database}` is the env id; `${<resource>.prefix}` is `<id>` for Redis and `<id>_` for Typesense. Every key, queue and collection the app writes must start with its prefix, or it leaks across envs and survives teardown.
+
 ## Development
 
 ```sh
 npm test   # node --test, against the fixture app in fixture/
+```
+
+Resource integration tests run against throwaway containers named by environment variables and are skipped when they are unset:
+
+```sh
+docker run -d --name test-postgres -e POSTGRES_PASSWORD=postgres postgres:16
+docker run -d --name test-mongo mongo:7
+docker run -d --name test-redis redis:7
+docker run -d --name test-typesense -p 8108:8108 -e TYPESENSE_API_KEY=test-key -e TYPESENSE_DATA_DIR=/tmp typesense/typesense:27.1
+
+WORKER_ENV_TEST_POSTGRES=test-postgres WORKER_ENV_TEST_MONGO=test-mongo WORKER_ENV_TEST_REDIS=test-redis \
+WORKER_ENV_TEST_TYPESENSE_URL=http://localhost:8108 WORKER_ENV_TEST_TYPESENSE_API_KEY=test-key npm test
 ```
 
 Releases are published to npm by semantic-release from conventional commits on `main`.

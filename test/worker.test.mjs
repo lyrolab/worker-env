@@ -7,17 +7,19 @@ import {
   realpathSync,
   rmSync,
 } from "node:fs"
-import { tmpdir } from "node:os"
+import { hostname, tmpdir } from "node:os"
 import { join } from "node:path"
 import { after, describe, test } from "node:test"
 import { fileURLToPath } from "node:url"
 import { isAlive, sleep } from "../src/process.mjs"
+import { provider } from "../src/resources.mjs"
 
 const bin = fileURLToPath(new URL("../bin/worker.mjs", import.meta.url))
 const fixture = fileURLToPath(new URL("../fixture", import.meta.url))
 const ORIGIN = /http:\/\/(my-app_worker_[0-9a-f]{12})\.my-app\.localhost:\d+/
 
 const checkouts = []
+const { WORKER_ENV_TEST_POSTGRES: POSTGRES } = process.env
 
 function checkout() {
   const dir = realpathSync(mkdtempSync(join(tmpdir(), "worker-env-test-")))
@@ -182,4 +184,81 @@ describe("worker up", () => {
     assert.notEqual(runtime(dir).id, undefined)
     await worker(dir, ["down"])
   })
+})
+
+describe("worker up with resources", () => {
+  test("a missing container fails up and names it", async () => {
+    const dir = checkout()
+    const result = await worker(dir, ["up"], {
+      FIXTURE_POSTGRES: "worker-env-test-missing",
+    })
+    assert.equal(result.code, 1)
+    assert.match(
+      result.stderr,
+      /resources\.db: container worker-env-test-missing is not running/,
+    )
+    assert.equal(runtime(dir).status, "failed")
+  })
+
+  test(
+    "creates the database before setup, records its owner and drops it on down",
+    {
+      skip: !POSTGRES && "set WORKER_ENV_TEST_POSTGRES to a Postgres container",
+    },
+    async () => {
+      const dir = checkout()
+      const db = provider({
+        type: "postgres",
+        container: POSTGRES,
+        user: "postgres",
+        url: "postgres://localhost",
+      })
+      const result = await worker(dir, ["up"], { FIXTURE_POSTGRES: POSTGRES })
+      assert.equal(result.code, 0, result.stderr)
+      const env = runtime(dir)
+      const url = `postgres://postgres:postgres@localhost:5432/${env.id}`
+      assert.deepEqual(env.resources, {
+        db: { type: "postgres", database: env.id, url },
+      })
+      assert.equal(
+        readFileSync(join(dir, "setup.txt"), "utf8"),
+        `${env.id} ${env.services.api.url} ${url}\n`,
+      )
+      const [record] = (await db.list("my-app")).filter(
+        ({ id }) => id === env.id,
+      )
+      assert.deepEqual(record.owner, {
+        host: hostname(),
+        pid: env.pid,
+        root: dir,
+        groups: servicePids(dir),
+      })
+
+      assert.equal((await worker(dir, ["down"])).code, 0)
+      assert.ok(!(await db.list("my-app")).some(({ id }) => id === env.id))
+    },
+  )
+
+  test(
+    "a failing service drops the database",
+    {
+      skip: !POSTGRES && "set WORKER_ENV_TEST_POSTGRES to a Postgres container",
+    },
+    async () => {
+      const dir = checkout()
+      const result = await worker(dir, ["up"], {
+        FIXTURE_POSTGRES: POSTGRES,
+        FIXTURE_FAIL: "start",
+      })
+      assert.equal(result.code, 1)
+      const { id } = runtime(dir)
+      const db = provider({
+        type: "postgres",
+        container: POSTGRES,
+        user: "postgres",
+        url: "postgres://localhost",
+      })
+      assert.ok(!(await db.list("my-app")).some((record) => record.id === id))
+    },
+  )
 })
