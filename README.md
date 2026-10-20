@@ -143,6 +143,40 @@ The owner of each resource is recorded as `{ host, pid, root, groups }`: host na
 - `url` of `typesense` is the API base URL, also used to check that Typesense answers before creating anything.
 - `${<resource>.database}` is the env id; `${<resource>.prefix}` is `<id>` for Redis and `<id>_` for Typesense. Every key, queue and collection the app writes must start with its prefix, or it leaks across envs and survives teardown.
 
+## Agent setup
+
+```sh
+npx worker init           # write .claude/rules/worker-env.md
+npx worker init --check   # exit 1 when that file differs from the installed version
+```
+
+`worker init` writes the agent rules shipped with the installed version to `.claude/rules/worker-env.md` at the checkout root, replacing the whole file; running it again changes nothing. The rules tell agents to prove changes with tests and typecheck first, start an env only to see the UI, QA a flow end to end or reproduce runtime-only behavior, and never clean up. Commit the file and run `worker init --check` in CI so it follows package upgrades. Edits to the file fail the check; put project-specific rules elsewhere.
+
+Claude Code loads `.claude/rules/` on its own. Add one line to the agent instructions every agent reads (`AGENTS.md`, or `CLAUDE.md` where no `AGENTS.md` exists):
+
+```md
+Before running the app, read and follow `.claude/rules/worker-env.md`.
+```
+
+Stop the env when a Claude Code session ends with a `SessionEnd` hook in `.claude/settings.json`:
+
+```json
+{
+  "hooks": {
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "cd \"$CLAUDE_PROJECT_DIR\" && pnpm worker down"
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
 ## Development
 
 ```sh
