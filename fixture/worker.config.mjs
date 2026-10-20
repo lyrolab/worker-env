@@ -1,5 +1,5 @@
 const node = process.execPath
-const { FIXTURE_FAIL, FIXTURE_POSTGRES } = process.env
+const { FIXTURE_FAIL, FIXTURE_POSTGRES, FIXTURE_REDIS } = process.env
 
 export default {
   name: "my-app",
@@ -15,15 +15,18 @@ export default {
       },
     },
   ],
-  ...(FIXTURE_POSTGRES && {
-    resources: {
+  resources: {
+    ...(FIXTURE_POSTGRES && {
       db: {
         type: "postgres",
         container: FIXTURE_POSTGRES,
         url: "postgres://postgres:postgres@localhost:5432",
       },
-    },
-  }),
+    }),
+    ...(FIXTURE_REDIS && {
+      cache: { type: "redis", container: FIXTURE_REDIS },
+    }),
+  },
   startTimeoutMs: 20_000,
   services: {
     api: {

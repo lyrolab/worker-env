@@ -1,5 +1,5 @@
 import { spawn, spawnSync } from "node:child_process"
-import { closeSync, openSync } from "node:fs"
+import { closeSync, openSync, readlinkSync } from "node:fs"
 import { createServer } from "node:net"
 
 export const sleep = (ms) => new Promise((done) => setTimeout(done, ms))
@@ -25,6 +25,29 @@ export function isAlive(pid) {
 
 export const commandLine = (pid) =>
   capture("ps", ["-ww", "-o", "command=", "-p", String(pid)]).stdout
+
+function workingDirectory(pid) {
+  if (process.platform === "linux") {
+    try {
+      return readlinkSync(`/proc/${pid}/cwd`)
+    } catch {
+      return ""
+    }
+  }
+  const lsof = capture("lsof", ["-a", "-p", String(pid), "-d", "cwd", "-Fn"])
+  const line = lsof.stdout.split("\n").find((field) => field.startsWith("n"))
+  return line?.slice(1) ?? ""
+}
+
+// A recorded process group may be gone and its id reused, so a group is only
+// signalled while its leader still runs from inside the checkout that recorded it.
+export function leadsGroupIn(pgid, root) {
+  if (!Number.isInteger(pgid) || pgid <= 1) return false
+  const group = capture("ps", ["-o", "pgid=", "-p", String(pgid)])
+  if (!group.ok || Number(group.stdout) !== pgid) return false
+  const cwd = workingDirectory(pgid)
+  return cwd === root || cwd.startsWith(`${root}/`)
+}
 
 export const freePort = () =>
   new Promise((done, reject) => {

@@ -20,7 +20,9 @@ const TOP_LEVEL_KEYS = [
   "resources",
   "services",
   "startTimeoutMs",
+  "idleTimeoutMs",
 ]
+export const IDLE_TIMEOUT_VARIABLE = "WORKER_ENV_IDLE_TIMEOUT_MS"
 const STEP_KEYS = ["command", "args", "cwd", "env"]
 const SERVICE_KEYS = [...STEP_KEYS, "health", "browser"]
 
@@ -144,6 +146,10 @@ export function validateConfig(config) {
   if (!Number.isInteger(startTimeoutMs) || startTimeoutMs <= 0)
     fail("startTimeoutMs", "must be a positive integer")
 
+  const idleTimeoutMs = config.idleTimeoutMs ?? 30 * 60_000
+  if (!Number.isInteger(idleTimeoutMs) || idleTimeoutMs <= 0)
+    fail("idleTimeoutMs", "must be a positive integer")
+
   if (!isObject(config.services) || Object.keys(config.services).length === 0)
     fail("services", "must declare at least one service")
   const services = {}
@@ -197,7 +203,19 @@ export function validateConfig(config) {
     resources,
     services,
     startTimeoutMs,
+    idleTimeoutMs,
   }
+}
+
+export function idleTimeoutMs(config, env = process.env) {
+  const override = env[IDLE_TIMEOUT_VARIABLE]
+  if (override === undefined || override === "") return config.idleTimeoutMs
+  const value = Number(override)
+  if (!Number.isInteger(value) || value <= 0)
+    throw new ConfigError(
+      `${IDLE_TIMEOUT_VARIABLE} must be a positive integer, got ${JSON.stringify(override)}`,
+    )
+  return value
 }
 
 export function interpolate(text, values) {
