@@ -1,9 +1,11 @@
 // Detached supervisor of one worker env, started by `worker up` with the checkout
 // root as its only argument. Any service exit, failed startup or termination
 // signal tears the whole env down and drops its resources; logs stay in .worker/.
+// Each service port is a pass-through to the server's private port, and the env
+// stops once no connection has been open on any of them for the idle timeout.
 import { hostname } from "node:os"
 import { join } from "node:path"
-import { loadConfig, resolveStep } from "./config.mjs"
+import { idleTimeoutMs, loadConfig, resolveStep } from "./config.mjs"
 import {
   freePort,
   killGroups,
@@ -11,6 +13,7 @@ import {
   spawnLogged,
   waitForHttp,
 } from "./process.mjs"
+import { passThrough } from "./passthrough.mjs"
 import { provider } from "./resources.mjs"
 import {
   LOCK_HELD_EXIT_CODE,
@@ -41,6 +44,9 @@ let runtime = {
   startedAt: new Date().toISOString(),
 }
 let cleanupPromise
+const fronts = []
+let connections = 0
+let idleTimer
 
 const save = (patch) => {
   runtime = { ...runtime, ...patch }
@@ -56,6 +62,7 @@ const track = (child) => {
 function cleanup(error) {
   cleanupPromise ??= (async () => {
     if (error) console.error(error)
+    clearTimeout(idleTimer)
     save({ status: "stopping" })
     await killGroups([...children].map((child) => child.pid))
     for (const { name, resource } of created.splice(0).reverse())
@@ -78,6 +85,30 @@ function cleanup(error) {
   return cleanupPromise
 }
 
+// Only the moves between "some connection open" and "none open" matter: the
+// idle countdown starts when the last connection closes.
+function onConnections() {
+  const open = fronts.reduce((total, front) => total + front.connections(), 0)
+  const changed = !open !== !connections
+  connections = open
+  if (changed) armIdle()
+}
+
+function armIdle() {
+  clearTimeout(idleTimer)
+  if (cleanupPromise || runtime.status !== "running") return
+  if (connections) {
+    save({ idleSince: null })
+    return
+  }
+  save({ idleSince: new Date().toISOString() })
+  idleTimer = setTimeout(() => {
+    console.log(`No connection for ${runtime.idleTimeoutMs} ms; stopping`)
+    save({ stoppedBy: "idle" })
+    void cleanup()
+  }, runtime.idleTimeoutMs)
+}
+
 for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"])
   process.on(signal, () => void cleanup())
 
@@ -85,7 +116,7 @@ async function start() {
   save({})
   const config = await loadConfig(root)
   const id = newEnvId(config.name)
-  save({ id, name: config.name })
+  save({ id, name: config.name, idleTimeoutMs: idleTimeoutMs(config) })
 
   const values = { id, name: config.name, root }
   const owner = { host: hostname(), pid: process.pid, root, groups: [] }
@@ -109,13 +140,17 @@ async function start() {
 
   const services = {}
   for (const [name, service] of Object.entries(config.services)) {
-    const port = await freePort()
+    const privatePort = await freePort()
+    const front = await passThrough(privatePort, onConnections)
+    fronts.push(front)
+    const { port } = front
     const url = `http://127.0.0.1:${port}`
     const origin = service.browser
       ? `http://${id}.${config.name}.localhost:${port}`
       : url
     services[name] = {
       port,
+      privatePort,
       url,
       origin,
       browser: service.browser,
@@ -141,7 +176,7 @@ async function start() {
   for (const [name, service] of Object.entries(config.services)) {
     const own = {
       ...values,
-      port: values[`${name}.port`],
+      port: String(services[name].privatePort),
       url: services[name].url,
       origin: services[name].origin,
     }
@@ -171,10 +206,13 @@ async function start() {
   const running = () => !cleanupPromise
   const ready = await Promise.all(
     Object.entries(config.services).map(([name, service]) =>
-      waitForHttp(`${services[name].url}${service.health}`, {
-        timeoutMs: config.startTimeoutMs,
-        isAlive: running,
-      }),
+      waitForHttp(
+        `http://127.0.0.1:${services[name].privatePort}${service.health}`,
+        {
+          timeoutMs: config.startTimeoutMs,
+          isAlive: running,
+        },
+      ),
     ),
   )
   if (!running()) return
@@ -186,6 +224,7 @@ async function start() {
 
   save({ status: "running", readyAt: new Date().toISOString() })
   console.log(`Worker env ${id} is running`)
+  armIdle()
 }
 
 start().catch((error) => {

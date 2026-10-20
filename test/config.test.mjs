@@ -1,6 +1,11 @@
 import assert from "node:assert/strict"
 import { test } from "node:test"
-import { ConfigError, interpolate, validateConfig } from "../src/config.mjs"
+import {
+  ConfigError,
+  idleTimeoutMs,
+  interpolate,
+  validateConfig,
+} from "../src/config.mjs"
 
 const valid = () => ({
   name: "my-app",
@@ -20,6 +25,24 @@ test("fills defaults", () => {
   assert.equal(config.services.api.health, "/")
   assert.equal(config.services.web.browser, true)
   assert.equal(config.startTimeoutMs, 180_000)
+  assert.equal(config.idleTimeoutMs, 1_800_000)
+})
+
+test("the idle timeout comes from the config unless the environment overrides it", () => {
+  const config = validateConfig({ ...valid(), idleTimeoutMs: 60_000 })
+  assert.equal(idleTimeoutMs(config, {}), 60_000)
+  assert.equal(
+    idleTimeoutMs(config, { WORKER_ENV_IDLE_TIMEOUT_MS: "1500" }),
+    1500,
+  )
+  assert.throws(
+    () => idleTimeoutMs(config, { WORKER_ENV_IDLE_TIMEOUT_MS: "soon" }),
+    /WORKER_ENV_IDLE_TIMEOUT_MS must be a positive integer/,
+  )
+  assert.throws(
+    () => validateConfig({ ...valid(), idleTimeoutMs: 0 }),
+    /idleTimeoutMs must be a positive integer/,
+  )
 })
 
 test("string steps run through the shell", () => {

@@ -2,6 +2,7 @@ import { spawn } from "node:child_process"
 import { closeSync, openSync, readFileSync, realpathSync } from "node:fs"
 import { join, relative } from "node:path"
 import { fileURLToPath } from "node:url"
+import { collectDeadEnvs } from "./collect.mjs"
 import { findRoot, loadConfig, resolveStep } from "./config.mjs"
 import { isAlive, killGroups, runStep, sleep } from "./process.mjs"
 import {
@@ -18,6 +19,32 @@ const supervisorPath = realpathSync(
 
 const SETTLED = ["running", "failed", "stopped"]
 
+export function idleStopInMs(runtime, now = Date.now()) {
+  if (runtime.status !== "running" || !runtime.idleTimeoutMs) return undefined
+  if (!runtime.idleSince) return null
+  return Math.max(
+    0,
+    Date.parse(runtime.idleSince) + runtime.idleTimeoutMs - now,
+  )
+}
+
+const duration = (ms) => {
+  const seconds = Math.ceil(ms / 1000)
+  return seconds < 60
+    ? `${seconds}s`
+    : `${Math.floor(seconds / 60)}m ${String(seconds % 60).padStart(2, "0")}s`
+}
+
+function idleLine(runtime) {
+  const remaining = idleStopInMs(runtime)
+  if (remaining === undefined) return []
+  if (remaining === null)
+    return [
+      `Connections are open; it stops ${duration(runtime.idleTimeoutMs)} after the last one closes.`,
+    ]
+  return [`Idle; it stops in ${duration(remaining)} unless a connection opens.`]
+}
+
 function describe(runtime, root) {
   const services = Object.entries(runtime.services ?? {})
   const width = Math.max(0, ...services.map(([name]) => name.length))
@@ -29,6 +56,7 @@ function describe(runtime, root) {
   return [
     `Worker env ${runtime.id} is ${runtime.status} (supervisor pid ${runtime.pid}).`,
     ...lines,
+    ...idleLine(runtime),
     `Logs in ${logs}/<service>.log, state in ${logs}/runtime.json. Stop it with \`worker down\`.`,
   ].join("\n")
 }
@@ -119,6 +147,8 @@ export async function up() {
   const config = await loadConfig(root)
   const state = stateDir(root)
 
+  await collectDeadEnvs(root, config)
+
   const running = await existingEnv(root)
   if (running) {
     console.log(`Already running.\n${describe(running, root)}`)
@@ -175,7 +205,8 @@ export async function status(args) {
   const runtime = pid ? readRuntime(root) : undefined
   const env = runtime?.pid === pid ? runtime : undefined
   if (args.includes("--json")) {
-    console.log(JSON.stringify(env ?? { status: "absent", root }, null, 2))
+    const record = env && { ...env, idleStopInMs: idleStopInMs(env) }
+    console.log(JSON.stringify(record ?? { status: "absent", root }, null, 2))
   } else if (env) {
     console.log(describe(env, root))
   } else {
