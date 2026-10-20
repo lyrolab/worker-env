@@ -1,0 +1,28 @@
+{
+  "name": "@lyrolab/worker-env",
+  "version": "0.0.0-development",
+  "description": "Isolated, self-supervised dev environments for coding agents, described by worker.config.mjs",
+  "type": "module",
+  "bin": {
+    "worker": "bin/worker.mjs"
+  },
+  "files": [
+    "bin",
+    "src"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "test": "node --test",
+    "release": "npx --yes semantic-release@25"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/lyrolab/worker-env"
+  },
+  "license": "MIT"
+}
