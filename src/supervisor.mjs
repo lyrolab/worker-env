@@ -1,6 +1,7 @@
 // Detached supervisor of one worker env, started by `worker up` with the checkout
 // root as its only argument. Any service exit, failed startup or termination
-// signal tears the whole env down; logs stay in .worker/.
+// signal tears the whole env down and drops its resources; logs stay in .worker/.
+import { hostname } from "node:os"
 import { join } from "node:path"
 import { loadConfig, resolveStep } from "./config.mjs"
 import {
@@ -10,6 +11,7 @@ import {
   spawnLogged,
   waitForHttp,
 } from "./process.mjs"
+import { provider } from "./resources.mjs"
 import {
   LOCK_HELD_EXIT_CODE,
   LockHeldError,
@@ -31,6 +33,7 @@ try {
 }
 
 const children = new Set()
+const created = []
 let runtime = {
   pid: process.pid,
   root,
@@ -55,6 +58,14 @@ function cleanup(error) {
     if (error) console.error(error)
     save({ status: "stopping" })
     await killGroups([...children].map((child) => child.pid))
+    for (const { name, resource } of created.splice(0).reverse())
+      await resource
+        .drop(runtime.id)
+        .catch((dropError) =>
+          console.error(
+            `Could not drop resource ${name}: ${dropError.message}`,
+          ),
+        )
     save({
       status: error ? "failed" : "stopped",
       ...(error && { error }),
@@ -77,6 +88,25 @@ async function start() {
   save({ id, name: config.name })
 
   const values = { id, name: config.name, root }
+  const owner = { host: hostname(), pid: process.pid, root, groups: [] }
+  const resources = Object.entries(config.resources).map(([name, options]) => ({
+    name,
+    resource: provider(options),
+  }))
+  for (const { name, resource } of resources)
+    await resource.check(`resources.${name}`)
+  const exposed = {}
+  for (const { name, resource } of resources) {
+    if (cleanupPromise) return
+    created.push({ name, resource })
+    await resource.create(id, owner)
+    const resourceValues = resource.values(id)
+    exposed[name] = { type: config.resources[name].type, ...resourceValues }
+    for (const [key, value] of Object.entries(resourceValues))
+      values[`${name}.${key}`] = value
+  }
+  save({ resources: exposed })
+
   const services = {}
   for (const [name, service] of Object.entries(config.services)) {
     const port = await freePort()
@@ -134,6 +164,9 @@ async function start() {
     })
   }
   save({ services })
+
+  owner.groups = Object.values(services).map((service) => service.pid)
+  for (const { resource } of created) await resource.recordOwner(id, owner)
 
   const running = () => !cleanupPromise
   const ready = await Promise.all(

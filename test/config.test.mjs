@@ -36,9 +36,48 @@ for (const [label, change, message] of [
   ["a name unfit for hostnames", (c) => (c.name = "My_App"), /name must match/],
   ["no services", (c) => (c.services = {}), /at least one service/],
   [
+    "a name too long for an env id",
+    (c) => (c.name = "a".repeat(44)),
+    /name must be at most 43 characters/,
+  ],
+  [
     "an unknown key",
-    (c) => (c.resources = {}),
-    /config\.resources is not a known key/,
+    (c) => (c.volumes = {}),
+    /config\.volumes is not a known key/,
+  ],
+  [
+    "an unknown resource type",
+    (c) => (c.resources = { db: { type: "mysql" } }),
+    /resources\.db\.type must be one of postgres, mongo, redis, typesense/,
+  ],
+  [
+    "a resource without its container",
+    (c) => (c.resources = { db: { type: "postgres", url: "postgres://x" } }),
+    /resources\.db\.container is required/,
+  ],
+  [
+    "a resource with an invalid URL",
+    (c) =>
+      (c.resources = { db: { type: "mongo", container: "m", url: "nope" } }),
+    /resources\.db\.url must be a URL/,
+  ],
+  [
+    "an unknown resource key",
+    (c) => (c.resources = { cache: { type: "redis", container: "r", db: 1 } }),
+    /resources\.cache\.db is not a known key/,
+  ],
+  [
+    "a resource named like a service",
+    (c) => (c.resources = { api: { type: "redis", container: "r" } }),
+    /resources\.api has the name of a service/,
+  ],
+  [
+    "a variable of another resource type",
+    (c) => {
+      c.resources = { cache: { type: "redis", container: "r" } }
+      c.services.api.env.X = "${cache.url}"
+    },
+    /unknown variable \$\{cache\.url\}/,
   ],
   [
     "an unknown service key",
@@ -75,6 +114,23 @@ for (const [label, change, message] of [
     )
   })
 }
+
+test("resources fill defaults and expose their values", () => {
+  const config = valid()
+  config.resources = {
+    db: { type: "postgres", container: "pg", url: "postgres://localhost" },
+    search: { type: "typesense", url: "http://localhost:8108", apiKey: "k" },
+  }
+  config.setup = [{ command: "migrate", env: { DATABASE_URL: "${db.url}" } }]
+  config.services.api.env.DB = "${db.database}"
+  config.services.api.env.PREFIX = "${search.prefix}"
+  assert.deepEqual(validateConfig(config).resources.db, {
+    type: "postgres",
+    container: "pg",
+    url: "postgres://localhost",
+    user: "postgres",
+  })
+})
 
 test("interpolates values", () => {
   assert.equal(interpolate("${a}-${b.c}", { a: "1", "b.c": "2" }), "1-2")

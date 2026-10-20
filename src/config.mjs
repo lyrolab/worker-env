@@ -1,10 +1,14 @@
 import { existsSync, realpathSync } from "node:fs"
 import { dirname, join, resolve } from "node:path"
 import { pathToFileURL } from "node:url"
+import { RESOURCE_TYPES } from "./resources.mjs"
 
 export const CONFIG_FILE = "worker.config.mjs"
 
 const NAME_PATTERN = /^[a-z][a-z0-9-]*$/
+// The env id `<name>_worker_<12 hex>` is a hostname label and a database name,
+// both capped at 63 characters.
+const NAME_MAX_LENGTH = 43
 const SERVICE_PATTERN = /^[a-z][a-z0-9-]*$/
 const VARIABLE_PATTERN = /\$\{([^}]*)\}/g
 const GLOBAL_VARIABLES = ["id", "name", "root"]
@@ -13,6 +17,7 @@ const TOP_LEVEL_KEYS = [
   "name",
   "install",
   "setup",
+  "resources",
   "services",
   "startTimeoutMs",
 ]
@@ -97,12 +102,43 @@ function checkVariables(strings, allowed, path) {
         )
 }
 
+function checkResources(resources, services) {
+  if (resources === undefined) return {}
+  if (!isObject(resources)) fail("resources", "must be an object")
+  const types = Object.keys(RESOURCE_TYPES)
+  return Object.fromEntries(
+    Object.entries(resources).map(([name, resource]) => {
+      const path = `resources.${name}`
+      if (!SERVICE_PATTERN.test(name))
+        fail(path, `name must match ${SERVICE_PATTERN}`)
+      if (name in services) fail(path, "has the name of a service")
+      if (!isObject(resource)) fail(path, "must be an object")
+      if (!types.includes(resource.type))
+        fail(`${path}.type`, `must be one of ${types.join(", ")}`)
+      const { keys } = RESOURCE_TYPES[resource.type]
+      checkKeys(resource, ["type", ...Object.keys(keys)], path)
+      const checked = { type: resource.type }
+      for (const [key, fallback] of Object.entries(keys)) {
+        const value = resource[key] ?? fallback
+        if (value === undefined) fail(`${path}.${key}`, "is required")
+        checkString(value, `${path}.${key}`)
+        if (key === "url" && !URL.canParse(value))
+          fail(`${path}.url`, "must be a URL")
+        checked[key] = value
+      }
+      return [name, checked]
+    }),
+  )
+}
+
 export function validateConfig(config) {
   if (!isObject(config)) fail("default export", "must be an object")
   checkKeys(config, TOP_LEVEL_KEYS, "config")
   checkString(config.name, "name")
   if (!NAME_PATTERN.test(config.name))
     fail("name", `must match ${NAME_PATTERN} (it becomes part of hostnames)`)
+  if (config.name.length > NAME_MAX_LENGTH)
+    fail("name", `must be at most ${NAME_MAX_LENGTH} characters`)
 
   const startTimeoutMs = config.startTimeoutMs ?? 180_000
   if (!Number.isInteger(startTimeoutMs) || startTimeoutMs <= 0)
@@ -130,10 +166,15 @@ export function validateConfig(config) {
     }
   }
 
+  const resources = checkResources(config.resources, services)
+
   const shared = new Set([
     ...GLOBAL_VARIABLES,
     ...Object.keys(services).flatMap((name) =>
       SERVICE_VARIABLES.map((variable) => `${name}.${variable}`),
+    ),
+    ...Object.entries(resources).flatMap(([name, { type }]) =>
+      RESOURCE_TYPES[type].values.map((value) => `${name}.${value}`),
     ),
   ])
   const own = new Set([...shared, ...SERVICE_VARIABLES])
@@ -149,7 +190,14 @@ export function validateConfig(config) {
   const setup = checkSteps(config.setup, "setup")
   checkVariables(setup.flatMap(stepStrings), shared, "setup")
 
-  return { name: config.name, install, setup, services, startTimeoutMs }
+  return {
+    name: config.name,
+    install,
+    setup,
+    resources,
+    services,
+    startTimeoutMs,
+  }
 }
 
 export function interpolate(text, values) {

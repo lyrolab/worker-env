@@ -1,3 +1,7 @@
 import { appendFileSync } from "node:fs"
 
-appendFileSync("setup.txt", `${process.env.ENV_ID} ${process.env.API_URL}\n`)
+const { ENV_ID, API_URL, DATABASE_URL } = process.env
+appendFileSync(
+  "setup.txt",
+  `${[ENV_ID, API_URL, DATABASE_URL].filter(Boolean).join(" ")}\n`,
+)
