@@ -2,15 +2,18 @@
 import { down, status, up } from "../src/commands.mjs"
 import { ConfigError } from "../src/config.mjs"
 import { init } from "../src/init.mjs"
+import { verify } from "../src/verify.mjs"
 
-const commands = { up, down, status, init }
+const commands = { up, down, status, init, verify }
 const usage = `Usage: worker <command>
 
 Commands:
   up              install, start the env in the background and print its URLs
   down            stop the env of this checkout
   status [--json] print the env of this checkout; exit 1 when none runs
-  init [--check]  write .claude/rules/worker-env.md; with --check, exit 1 when it differs`
+  init [--check]  write .claude/rules/worker-env.md; with --check, exit 1 when it differs
+  verify [--wait SECONDS] -- COMMAND [ARG...]
+                  run COMMAND once one of the host's heavy-command slots is free`
 
 const [name, ...args] = process.argv.slice(2)
 const command = commands[name]

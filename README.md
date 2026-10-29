@@ -11,6 +11,7 @@ npm install --save-dev @lyrolab/worker-env
 npx worker up       # install, start the env in the background, print its URLs
 npx worker status   # print the env of this checkout (--json for the runtime record)
 npx worker down     # stop the env and wait for teardown
+npx worker verify -- pnpm test   # run a heavy command once a host-wide slot is free
 ```
 
 The commands find `worker.config.mjs` in the current directory or its nearest parent; that directory is the checkout.
@@ -156,6 +157,28 @@ Every `worker up` first collects envs whose supervisor died without tearing down
 - An env id is collected when every owner recorded on its resources names this host and a supervisor that no longer runs. Envs of live supervisors and of other hosts stay, and so does a resource without a readable owner record, whose supervisor may still be starting.
 - The recorded process groups are stopped first, each only while its leader still runs from inside the recorded checkout. Services of this checkout's last env are stopped the same way when its supervisor is gone.
 - Its resources are then dropped from every configured resource, under the same id pattern check as teardown, so the owner env is never touched.
+
+## Heavy-command slots
+
+```sh
+worker verify [--wait SECONDS] -- COMMAND [ARG...]
+```
+
+Agents sharing a host run tests, typecheck, lint, builds, installs and `worker up` through `worker verify`, so only a few heavy commands load the host at once. It takes the first free slot of a host-wide pool, runs `COMMAND` and releases the slot when `COMMAND` exits. It needs no `worker.config.mjs` and works the same on macOS and Linux.
+
+- `COMMAND` runs without a shell, in the current directory, with the arguments, environment and standard streams of `worker verify` unchanged. Run compound commands through `sh -c`.
+- `--wait` is how long to wait for a slot, 300 seconds by default; `--wait 0` tries every slot once. When no slot frees up in time, `COMMAND` never starts and `worker verify` exits 75.
+- Otherwise it exits with the status of `COMMAND`, 75 included, so use the output to tell a busy pool from a command that exited 75. A command that is not found exits 127; one killed by a signal exits 128 plus the signal number.
+- SIGINT, SIGTERM and SIGHUP reach `COMMAND`, whether sent to the process group (Ctrl-C) or to `worker verify` alone; `worker verify` waits for `COMMAND` to exit, releases the slot and dies of the same signal.
+- A slot is a kernel file lock held by `worker verify` itself, never by `COMMAND` or its descendants: processes `COMMAND` leaves running in the background hold no slot, and the kernel releases the slot when `worker verify` dies, even by SIGKILL. Killing `worker verify` alone with SIGKILL therefore lets `COMMAND` run on without a slot.
+- Usage errors and unusable lock paths exit 2 without running `COMMAND`. There is no option to run without a slot.
+
+| Variable                 | Default                                                                                                                           | Description                           |
+| ------------------------ | --------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------- |
+| `WORKER_VERIFY_SLOTS`    | `3`                                                                                                                               | Size of the pool.                     |
+| `WORKER_VERIFY_LOCK_DIR` | `$XDG_CACHE_HOME/worker-env/verify`, else `~/Library/Caches/worker-env/verify` on macOS and `~/.cache/worker-env/verify` on Linux | Absolute directory of the slot files. |
+
+Every process using the same directory shares the pool. Slot files are `heavy-verification.lock`, `heavy-verification.1.lock`, `heavy-verification.2.lock`, …; never delete or replace them to clear contention, since a new file escapes the lock held on the old one. On macOS the lock is taken by `open(2)` with `O_EXLOCK`; on Linux, which has no such flag, by util-linux `flock(1)`, held in a session of its own and released when `worker verify` closes its stdin. Both are `flock(2)` locks, so `worker verify` and `flock heavy-verification.lock COMMAND` exclude each other on the same files.
 
 ## Agent setup
 
